@@ -1,0 +1,247 @@
+---
+title: "spaTMB"
+author: "Berent Lunde"
+date: "5 april 2019"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+\newcommand{\sp}{\hat{\mathbf{s}}(\theta)}
+\newcommand{\u}{\hat{\mathbf{u}}(\theta)}
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We seek to employ the framework of the R package Template Model Builder (**TMB**)-ref- ++ -- which approximately "integrates out" latent variables using the Laplace approximation -- to automatically solve the inner problem of the saddlepoint approximation (SPA) and return the negative logarithm of the SPA.
+The table of contents gives an idea of how the document is laid out.
+
+
+### Introduction to the Laplace approximation
+
+We consider the Laplace approximation in the context of likelihood estimation, following (read: stolen from) -TMB paper- completely:
+Let $f(\mathbf{u},\theta)$  denote the negative joint log-likelihood of the data and the random effects. This
+depends on the unknown random effects $\mathbf{u}\in\mathbb{R}^n$ and parameters $\theta\in\mathbb{R}^m$.
+The maximum likelihood estimate for θ maximizes
+$$
+\begin{align*}
+    L(\theta) = \int_{\mathbb{R}^n} \exp(-f(\mathbf{u},\theta)) d\mathbf{u},
+\end{align*}
+$$
+i.e., the random effects $\mathbf{u}$ have been integrated out.
+High-dimensional integration is, in general, difficult, 
+but can be achieved by applying the Laplace approximation,
+giving the approximation
+$$
+\begin{align*}
+    L^* = \frac{\sqrt{2\pi}^n \exp(-f(\mathbf{\u},\theta))}{\sqrt{\| \nabla_\mathbf{u}^2f(\mathbf{u},\theta) \|}},   
+\end{align*}
+$$
+where
+
+- $\u = \arg\min_\mathbf{u} f(\mathbf{u},\theta)$,
+- and $\nabla_\mathbf{u}^2f(\mathbf{u},\theta)$ is the Hessian matrix, denoted $H(\theta)$ from here on out.
+
+
+
+### Introduction to the Saddlepoint approximation
+
+The SPA takes as a vantage point the following inversion integral:
+$$
+\begin{align*}
+    f_\mathbf{Y}(\mathbf{y};\theta) = \frac{1}{(2\pi)^n} \int_{\mathbb{R}^n} e^{( (\tau + i \mathbf{s})^T  \mathbf{y} ) } 
+    M_\mathbf{Y}(\tau + i\mathbf{s} ; \theta) d\mathbf{s}.
+\end{align*}
+$$
+where $i=\sqrt{-1}$, $\tau\in\mathbb{R}^n$ such that $E(\exp(\tau^T\mathbf{y})) < \infty$. - Butler
+
+Applying the Laplace approximation to this integral, we obtain multivaraite saddlepoint approximation: 
+$$
+\texttt{spa}(f;\mathbf{y}) = 
+\frac{\exp\left(K_\mathbf{y}(\sp;\theta)-\sp^T \mathbf{y}\right)}
+{(2\pi)^{(n/2)}\sqrt{\| \nabla_\mathbf{s}^2 K_\mathbf{y}(\sp;\theta) \|}}
+$$
+
+where
+
+- $K_\mathbf{y}(\mathbf{s};\theta)  = \log M_\mathbf{y}(\mathbf{s};\theta)$,
+- $\nabla_\mathbf{s}^2 K_\mathbf{y}(\mathbf{s};\theta)$ is the Hessian matrix, 
+- and the saddlepoint $\sp$ solves $\sp = \arg\min_{\mathbf{s}} K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y}$
+
+see Kleppe-Skaug 2006 for a general derivation.
+
+
+### Introduction to **TMB**
+
+
+Template model builder, or **TMB** for short, wraps (on the C++ side) the high-performance C++ libraries **Eigen** (a C++ template library for linear algebra: matrices, vectors, numerical solvers, and related algorithms) and **CppAD** (templated automatic differentiation using operator overloading), for R users to obtain highly efficient evaluations of objective functions and their derivatives (gradient and Hessian) and with automatically performing the Laplace approximation as its high-point.
+
+The **TMB** user only has to specify the objective function $f(\theta)$, or $f(\mathbf{u}, \theta)$ in the case of latent variables $\mathbf{u}$ that needs to be integrated out, and **TMB** takes care of the rest.
+Specifically, the (negative log) Laplace approximation to the negative joint log-likelihood is returned:
+$$
+ - \log L^*(\theta) = -n \log \sqrt{2\pi} + \frac{1}{2}\log \| H(\theta) \| + f(\u,\theta).
+$$
+Using this, the likelihood estimates of $\theta$, i.e. $\hat{\theta}=\arg\min_\theta$, can be found very efficiently, because **TMB** also returnes the gradient and Hessian of $-\log L^*(\theta)$ w.r.t. $\theta$.
+
+#### Example from TMB
+
+<details> <summary> R code</summary>
+```{r tmb, eval=F, tidy=T}
+## Simulate data
+set.seed(123)
+n <- 10000
+sigma <- .3
+phi <- .8
+simdata <- function(){
+    u <- numeric(n)
+    u[1] = rnorm(1)
+    if(n>=2)
+        for(i in 2:n){
+            u[i] = phi * u[i-1] + rnorm(1, sd = sqrt(1 - phi^2))
+        }
+    u <- u * sigma
+    x <- as.numeric( rbinom(n, 1, plogis(u)) )
+    data <- list(obs=x)
+    data
+}
+##
+data <- simdata()
+parameters <- list(phi=phi, logSigma=log(sigma))
+
+## Adapt parameter list
+parameters$u <- rep(0,n)
+
+require(TMB)
+compile('laplace.cpp')
+dyn.load(dynlib('laplace'))
+
+obj <- MakeADFun(data, parameters, random="u", DLL="laplace")
+obj$fn()
+
+system.time( opt <- nlminb(obj$par,obj$fn,obj$gr) )
+(sdr <- sdreport(obj))
+
+```
+</details>
+<details> <summary> C++ code</summary>
+```{r tmbcpp, eval=F, tidy=T}
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+  DATA_VECTOR(obs);
+  PARAMETER(phi);
+  PARAMETER(logSigma);
+  PARAMETER_VECTOR(u);
+  using namespace density;
+  Type sigma= exp(logSigma);
+  Type f = 0;
+  f += SCALE(AR1(phi), sigma)(u);
+  vector<Type> p = invlogit(u);
+  f -= dbinom(obs, Type(1), p, true).sum();
+  return f;
+}
+
+```
+</details>
+
+
+### Using **TMB** in numerical SPA calculations and parameter optimization
+
+Set the goal of making **TMB** automatically solve the inner problem of the SPA, 
+and returning the negative log SPA for the purpose of likelihood optimisation.
+Ideally, we would have **TMB** return
+$$
+    -\log \texttt{spa}(f,\mathbf{y})
+    = \frac{1}{2}\left( \log \| \nabla_\mathbf{s}^2 K_\mathbf{y}(\sp;\theta) \| + n\log(2\pi) \right) - 
+    \left(K_\mathbf{y}(\sp;\theta)-\sp^T \mathbf{y}\right).
+$$
+However, to solve the inner problem of the SPA, we need to supply the following objective:
+$$
+\begin{align*}
+f(\mathbf{u},\theta) &= K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi)\\
+&\sim K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y},
+\end{align*}
+$$
+where $\mathbf{s}$ is set to $\texttt{random}$ (and hence, will be integrated out by **TMB**).
+However, **TMB** would then return
+$$
+- \log L^*(\theta) = -\log \texttt{spa}(f,\mathbf{y}) + 2 \left(K_\mathbf{y}(\sp;\theta)-\sp^T \mathbf{y}\right).
+$$
+i.e., the sign is reversed on $f(\mathbf{u},\theta) \sim K_\mathbf{y}(\sp;\theta)-\sp^T \mathbf{y}$.
+This is because, for the SPA, the Laplace approximation is calculated w.r.t. the objective
+$$
+f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{\tau} + i\mathbf{s};\theta) - (\mathbf{\tau} + i\mathbf{s})^T\mathbf{y} - n\log (2\pi),
+$$
+where the imaginary unit, $i$, reverses the sign of the Hessian (w.r.t $\mathbf{\tau}$), replacing minimization with maximization in the the inner optimization and vice versa.
+
+
+The solution is however simple:
+supply to **TMB** the objective function
+$$
+f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi),
+$$
+so that the inner problem is solved,
+but supply the negative objective, gradient and (possibly) Hessian to the outer optimisation routine in R.
+**TMB** will then return
+$$
+    -\log L^*(\theta) = 
+    =
+    \texttt{spa}
+$$
+and derivatives of the objective.
+
+The alternative, to make everything completely automatic, would be to switch the inner optimization from minimization to maximization, and supply the negative of the proposal.
+
+To make use of **TMB** in calculating the SPA
+
+
+
+lines 578-- at https://github.com/kaskr/adcomp/blob/master/TMB/R/TMB.R
+
+
+
+Then, ideally, we would supply the original inner problem of the SPA:
+
+where $\mathbf{\tau}$ is set to $\texttt{random}$.
+The effect of the imaginary unit is to reverse the sign of the Hessian (w.r.t $\mathbf{\tau}$), 
+
+**TMB** does not directly allow complex AD data types (while still possible inside TMB, see e.g. [this file on Github](https://github.com/Blunde1/it-ift/blob/master/implementation/includes/complex.hpp) and example use (advanced SPA calculations) in corresponding repository).
+
+The solution is however simple:
+supply to **TMB** the objective function
+$$
+f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi),
+$$
+so that the inner problem is solved,
+but supply the negative objective, gradient and (possibly) Hessian to the outer optimisation routine in R.
+**TMB** will then return
+$$
+    -\log L^*(\theta) = 
+    =
+    \texttt{spa}
+$$
+and derivatives of the objective.
+
+The alternative, to make everything completely automatic, would be to switch the inner optimization from minimization to maximization, and supply the negative of the proposal.
+
+To make use of **TMB** in calculating the SPA
+
+From the introductions of the Laplace approximation, **TMB** and the SPA, it should be clear
+that if we supply the inner problem of the SPA
+$$
+f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y},
+$$
+as the objective function in **TMB**, and choose $\mathbf{s}(\theta)$ as $\texttt{random}$,
+then **TMB** will return
+
+and corresponding derivatives.
+Using this, we can supply ... to some optimization algorithm and obtain the likelihood estimates $\hat{\theta}$.
+
+
+
+### **spaTMB** example
