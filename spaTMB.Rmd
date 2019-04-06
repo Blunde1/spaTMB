@@ -37,6 +37,7 @@ include_source <- function(x,linesToInclud=seq(1:9999)) {
 
 We seek to employ the framework of the R package Template Model Builder [**TMB**](https://github.com/kaskr/adcomp) [@kristensen2016tmb] which approximately "integrates out" latent variables using the Laplace approximation -- to automatically solve the inner problem of the saddlepoint approximation (SPA) and return the negative logarithm of the SPA.
 The table of contents gives an idea of how the document is laid out.
+And all code can be found [in this Github repository](https://github.com/Blunde1/spaTMB).
 
 
 ### Introduction to the Laplace approximation
