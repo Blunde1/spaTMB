@@ -10,6 +10,8 @@ output:
 
 \newcommand{\sp}{\hat{\mathbf{s}}(\theta)}
 \newcommand{\u}{\hat{\mathbf{u}}(\theta)}
+\usepackage{amsmath}
+\DeclareMathOperator{\Tr}{Tr}
 
 
 ```{r setup, include=FALSE}
@@ -127,7 +129,7 @@ system.time( opt <- nlminb(obj$par,obj$fn,obj$gr) )
 ```
 </details>
 <details> <summary> C++ code</summary>
-```{r tmbcpp, eval=F, tidy=T}
+```{c tmbcpp, eval=F, tidy=T}
 #include <TMB.hpp>
 
 template<class Type>
@@ -167,7 +169,7 @@ f(\mathbf{u},\theta) &= K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y}
 &\sim K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y},
 \end{align*}
 $$
-where $\mathbf{s}$ is set to $\texttt{random}$ (and hence, will be integrated out by **TMB**).
+where $\mathbf{s}$ is set to `random` (and hence, will be integrated out by **TMB**).
 However, **TMB** would then return
 $$
 - \log L^*(\theta) = -\log \texttt{spa}(f,\mathbf{y}) + 2 \left(K_\mathbf{y}(\sp;\theta)-\sp^T \mathbf{y}\right).
@@ -178,70 +180,170 @@ $$
 f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{\tau} + i\mathbf{s};\theta) - (\mathbf{\tau} + i\mathbf{s})^T\mathbf{y} - n\log (2\pi),
 $$
 where the imaginary unit, $i$, reverses the sign of the Hessian (w.r.t $\mathbf{\tau}$), replacing minimization with maximization in the the inner optimization and vice versa.
-
-
-The solution is however simple:
-supply to **TMB** the objective function
-$$
-f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi),
-$$
-so that the inner problem is solved,
-but supply the negative objective, gradient and (possibly) Hessian to the outer optimisation routine in R.
-**TMB** will then return
-$$
-    -\log L^*(\theta) = 
-    =
-    \texttt{spa}
-$$
-and derivatives of the objective.
-
-The alternative, to make everything completely automatic, would be to switch the inner optimization from minimization to maximization, and supply the negative of the proposal.
-
-To make use of **TMB** in calculating the SPA
-
-
-
-lines 578-- at https://github.com/kaskr/adcomp/blob/master/TMB/R/TMB.R
-
-
-
-Then, ideally, we would supply the original inner problem of the SPA:
-
-where $\mathbf{\tau}$ is set to $\texttt{random}$.
-The effect of the imaginary unit is to reverse the sign of the Hessian (w.r.t $\mathbf{\tau}$), 
-
 **TMB** does not directly allow complex AD data types (while still possible inside TMB, see e.g. [this file on Github](https://github.com/Blunde1/it-ift/blob/master/implementation/includes/complex.hpp) and example use (advanced SPA calculations) in corresponding repository).
 
-The solution is however simple:
-supply to **TMB** the objective function
-$$
-f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi),
-$$
-so that the inner problem is solved,
-but supply the negative objective, gradient and (possibly) Hessian to the outer optimisation routine in R.
-**TMB** will then return
-$$
-    -\log L^*(\theta) = 
-    =
-    \texttt{spa}
-$$
-and derivatives of the objective.
+There are at least four possible solutions:
 
-The alternative, to make everything completely automatic, would be to switch the inner optimization from minimization to maximization, and supply the negative of the proposal.
+- Use the `autodiff` namespace to construct structs of $K$ and the inner problem, and a Newton type algorithm to solve it. This is not ideal, because all Newton iterations will be taped by **TMB**, while only the last two should be sufficient for derivatives w.r.t. $\theta$. See [this code for an example](https://github.com/Blunde1/HyperSDE/blob/master/HyperSDE/src/HyperSDE.cpp).
+- Use `ADREPORT` on the quantities needed to build the negative $\log \texttt{spa}$ and its gradient
+- Use the quantities in `obj$env` to build new `obj$fn` and `obj$gr`.
+- Update `MakeADFun`with a `spa=TRUE` option, such that SPA calculations are performed instead of Laplace. This would essentially do the same as point three (but be under the hood).
 
-To make use of **TMB** in calculating the SPA
+I have done a hybrid between point 3 and 4; ideally I would like to make a branch on my TMB installation to do point 4, but I am on a Windows machine and hence not blessed with the developer version.
+If this works, I will still make a pull-request (however, untried) on MakeADFun with a SPA option to adcomp/TMB.
 
-From the introductions of the Laplace approximation, **TMB** and the SPA, it should be clear
-that if we supply the inner problem of the SPA
+To update `MakeADFun` or the `obj$env`, the [source code](https://github.com/kaskr/adcomp/blob/master/TMB/R/TMB.R) must be studied.
+The following table summarizes my findings (conditioned on no special options evoked in the `MakeADFun` call).
+Here, we write $l$ for the Laplace approximation and $h$ for the functional form (but unsolved inner problem),
+denote partial derivatives by subscripts, i.e. $H=f_{\mathbf{u}\mathbf{u}}$, 
+and write $\mathbf{\nu}=(\mathbf{u},\theta)$ for the collection of parameters.
+
+Function name | Order | Mathemtical expression | Description  
+----------|-------|-----------------------|----------------------------
+`f` | `order==0` | $f(\mathbf{u},\theta)$ | The user supplied objective
+|    | `order==1` | $f_\mathbf{\nu}(\mathbf{u},\theta)$ | The gradient of user objective
+|    | `order==2` | $f_{\mathbf{\nu} \mathbf{\nu}}(\mathbf{u},\theta)$ | The Hessian matrix of $f$ w.r.t. all parameters
+`h` | `order==0` | $h(\mathbf{u},\theta)=f(\mathbf{u},\theta) + \frac{1}{2}\log\| f_{\mathbf{u}\mathbf{u}}(\mathbf{u},\theta) \| - \frac{n}{2}\log(2\pi)$ | The Laplace objective
+|   |   `order==1` | $h_\nu(\mathbf{u},\theta)=f_\mathbf{\nu}(\mathbf{u},\theta) + \frac{1}{2}\nabla_\nu \log\|f_{\mathbf{u}\mathbf{u}}(u,\theta) \|$ | The derivative of the Laplace objective w.r.t. all parameters
+`ff`|   `order==0` | $l(\u,\theta)=h(\u,\theta);~ \u=\arg\min_\mathbf{u} f(\mathbf{u},\theta)$ | `h(order=0)` at $\mathbf{u}=\u$ |
+|   |   `order==1` | $\begin{align}l_\theta(\u,\theta) &= h_\theta(\u,\theta)\\ &-h_\mathbf{u}(\u,\theta)f_{\mathbf{u}\mathbf{u}}(\u,\theta)^{-1} f_{\mathbf{u}\theta}(\u,\theta)\end{align}$ | Gradient of the Laplace approximation w.r.t. $\theta$
+
+<details> <summary> A side note </summary>
+The expression $\nabla_\nu \log\|f_{\mathbf{u}\mathbf{u}}(u,\theta) \|$ in $`h(order==1)` is difficult and deserve special attention.
+From --cite variance components page 457-- we have, for an individual element $\nu_j$
+
 $$
-f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y},
+\frac{\partial}{\partial \nu_j} \log\|f_{\mathbf{u}\mathbf{u}}(u,\theta) \| = \mathrm{tr}\left( f_{\mathbf{u}\mathbf{u}}(u,\theta)^{-1} \frac{\partial}{\partial \nu_j} f_{\mathbf{u}\mathbf{u}}(u,\theta) \right).
 $$
-as the objective function in **TMB**, and choose $\mathbf{s}(\theta)$ as $\texttt{random}$,
-then **TMB** will return
+This can also be solved purely by using AD, see Table 1 in -cite Skaug Fournier 2006-.
 
-and corresponding derivatives.
-Using this, we can supply ... to some optimization algorithm and obtain the likelihood estimates $\hat{\theta}$.
+</details>
 
+
+From this summary, it should be clear that if we 
+
+1. Supply the objective function 
+$$f(\mathbf{u},\theta) = K_\mathbf{y}(\mathbf{s};\theta) - \mathbf{s}^T\mathbf{y} - n\log (2\pi)$$
+With $\mathbf{s}$ set to `random`.
+2. Manipulate `h(order=0)` to return the negative log SPA 
+$$h(\mathbf{u},\theta)= -f(\mathbf{u},\theta) + \frac{1}{2}\log\| f_{\mathbf{u}\mathbf{u}}(\mathbf{u},\theta) \| - \frac{n}{2}\log(2\pi)$$.
+3. Manipulate `h(order=1)` to the negative log spa derivative:
+$$
+\begin{align}
+h_\nu(\mathbf{u},\theta)= - f_\mathbf{\nu}(\mathbf{u},\theta) + 
+\frac{1}{2}\nabla_\nu \log\|f_{\mathbf{u}\mathbf{u}}(u,\theta) \|
+\end{align}
+$$
+
+then **TMB** will take care of the rest.
+The R code for the "fix" is provided.
+
+
+<details> <summary> R code for solution </summary>
+```{r solution, eval=F, tidy=T}
+# after MakeADFun
+attach(obj$env)
+# update h
+obj$env$h <- function(theta=par, order=0, hessian, L, ...) {
+    if(order == 0) {
+        ##logdetH <- determinant(hessian)$mod
+        logdetH <- 2*determinant(L)$mod
+        ans <- -f(theta,order=0) + .5*logdetH - length(random)/2*log(2*pi) #### updated
+        if(LaplaceNonZeroGradient){
+            grad <- f(theta,order=1)[random]
+            ans - .5* sum(grad * as.numeric( solveCholesky(L, grad) ))
+        } else
+            ans
+    }
+    else if(order == 1) {
+        if(LaplaceNonZeroGradient)stop("Not correct for LaplaceNonZeroGradient=TRUE")
+        ##browser()
+        e <- environment(spHess)
+        solveSubset <- function(L).Call("tmb_invQ",L,PACKAGE="TMB")
+        solveSubset2 <- function(L).Call("tmb_invQ_tril_halfdiag",L,PACKAGE="TMB")
+        ## FIXME: The following two lines are not efficient:
+        ## 1. ihessian <- tril(solveSubset(L))
+        ## 2. diag(ihessian) <- .5*diag(ihessian)
+        ## Make option to solveSubset to return lower triangular part
+        ## with diagonal halved. As it is now the output of solveSubset is
+        ## symm _with upper storage_ (!) (side effect of cholmod_ptranspose)
+        ## therefore tril takes long time. Further, "diag<-" is too slow.
+        ## FIXED! :
+        ihessian <- solveSubset2(L)
+        ## Profile case correction (1st order case only)
+        if(!is.null(profile)){
+            ## Naive way:
+            ##   ihessian[profile,] <- 0
+            ##   ihessian[,profile] <- 0
+            ## However, this would modify sparseness pattern and also not
+            ## account for 'ihessian' being permuted:
+            perm <- L@perm+1L
+            ihessian <- .Call("tmb_sparse_izamd", ihessian, profile[perm], 0.0, PACKAGE="TMB")
+        }
+        
+        ## General function to lookup entries A subset B.
+        ## lookup.old <- function(A,B){
+        ##   A <- as(tril(A),"dtTMatrix")
+        ##   B <- as(tril(B),"dtTMatrix")
+        ##   match(paste(A@i,A@j),paste(B@i,B@j))
+        ## }
+        ## General function to lookup entries A in B[r,r] assuming pattern of A
+        ## is subset of pattern of B[r,r].
+        lookup <- function(A,B,r=NULL){
+            A <- tril(A); B <- tril(B)
+            B@x[] <- seq.int(length.out=length(B@x)) ## Pointers to full B matrix (Can have up to 2^31-1 non-zeros)
+            if(!is.null(r)){
+                ## Goal is to get:
+                ##     B <- forceSymmetric(B)
+                ##     B <- B[r,r,drop=FALSE]
+                ## However the internal Matrix code for
+                ## "B[r,r,drop=FALSE]" creates temporary "dgCMatrix"
+                ## thereby almost doubling the number of non-zeros. Need
+                ## solution that works with max (2^31-1) non-zeros:
+                B <- .Call("tmb_half_diag", B, PACKAGE="TMB")
+                B <- tril( B[r,r,drop=FALSE] ) + tril( t(B)[r,r,drop=FALSE] )
+            }
+            m <- .Call("match_pattern", A, B, PACKAGE="TMB") ## Same length as A@x with pointers to B@x
+            B@x[m]
+        }
+        if(is.null(e$ind1)){
+            ## hessian: Hessian of random effect part only.
+            ## ihessian: Inverse subset of hessian (same dim but larger pattern!).
+            ## Hfull: Pattern of full hessian including fixed effects.
+            if (!silent) cat("Matching hessian patterns... ")
+            iperm <- invPerm(L@perm+1L)
+            e$ind1 <- lookup(hessian,ihessian,iperm) ## Same dimensions
+            e$ind2 <- lookup(hessian,e$Hfull,random)  ## Note: dim(Hfull)>dim(hessian) !
+            if (!silent) cat("Done\n")
+        }
+        w <- rep(0,length=length(e$Hfull@x))
+        w[e$ind2] <- ihessian@x[e$ind1]
+        ## Reverse mode evaluate ptr in rangedirection w
+        ## now gives .5*tr(Hdot*Hinv) !!
+        ## return
+        as.vector( -f(theta,order=1) ) +
+            .Call("EvalADFunObject", e$ADHess$ptr, theta,
+                  control=list(
+                      order=as.integer(1),
+                      hessiancols=as.integer(0),
+                      hessianrows=as.integer(0),
+                      sparsitypattern=as.integer(0),
+                      rangecomponent=as.integer(1),
+                      rangeweight=as.double(w),
+                      dumpstack=as.integer(0),
+                      doforward=as.integer(1)
+                  ),
+                  PACKAGE=DLL)
+    }## order == 1
+    else stop(sprintf("'order'=%d not yet implemented", order))
+} ## end{ h }
+
+```
+</details>
 
 
 ### **spaTMB** example
+
+Finally, an example for which we know the true solution is supplied.
+
+
