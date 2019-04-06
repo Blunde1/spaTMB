@@ -17,6 +17,22 @@ bibliography: Bibliography.bib
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(kableExtra)
+```
+
+```{r utils, warning=F, message=F, include=F}
+library(TMB)
+#' This function writes out files such that they can be illustrated in rmarkdown.
+#' @param x The file name
+#' @param linesToInclud A vector giving the line numbers which are to be written
+include_source <- function(x,linesToInclud=seq(1:9999)) {
+    ans <- readLines(x)
+    linesToInclud = linesToInclud[1:min(length(linesToInclud), length(ans))]
+    ans = ans[linesToInclud]
+    ans = ans[!is.na(ans)]
+    return(cat(paste(ans, collapse="\n")))
+}
 ```
 
 We seek to employ the framework of the R package Template Model Builder [**TMB**](https://github.com/kaskr/adcomp) [@kristensen2016tmb] which approximately "integrates out" latent variables using the Laplace approximation -- to automatically solve the inner problem of the saddlepoint approximation (SPA) and return the negative logarithm of the SPA.
@@ -59,7 +75,7 @@ $$
     M_\mathbf{Y}(\tau + i\mathbf{s} ; \theta) d\mathbf{s}.
 \end{align*}
 $$
-where $i=\sqrt{-1}$, $\tau\in\mathbb{R}^n$ such that $E(\exp(\tau^T\mathbf{y})) < \infty$. - Butler
+where $i=\sqrt{-1}$, $\tau\in\mathbb{R}^n$ such that $E(\exp(\tau^T\mathbf{y})) < \infty$ [@butler2007saddlepoint].
 
 Applying the Laplace approximation to this integral, we obtain multivaraite saddlepoint approximation: 
 $$
@@ -87,7 +103,7 @@ Specifically, the (negative log) Laplace approximation to the negative joint log
 $$
  - \log L^*(\theta) = -n \log \sqrt{2\pi} + \frac{1}{2}\log \| H(\theta) \| + f(\u,\theta).
 $$
-Using this, the likelihood estimates of $\theta$, i.e. $\hat{\theta}=\arg\min_\theta$, can be found very efficiently, because **TMB** also returnes the gradient and Hessian of $-\log L^*(\theta)$ w.r.t. $\theta$.
+Using this, the likelihood estimates of $\theta$, i.e. $\hat{\theta}=\arg\min_\theta - \log L^*(\theta)$, can be found very efficiently, because **TMB** also returnes the gradient and (finite difference approximation) Hessian of $-\log L^*(\theta)$ w.r.t. $\theta$.
 
 #### Example from TMB
 
@@ -237,12 +253,13 @@ h_\nu(\mathbf{u},\theta)= - f_\mathbf{\nu}(\mathbf{u},\theta) +
 $$
 
 then **TMB** will take care of the rest.
-The R code for the "fix" is provided.
+The R code for the "fix" is provided below.
 
 
 <details> <summary> R code for solution </summary>
 ```{r solution, eval=F, tidy=T}
 # after MakeADFun
+library(Matrix)
 attach(obj$env)
 # update h
 obj$env$h <- function(theta=par, order=0, hessian, L, ...) {
@@ -345,6 +362,98 @@ obj$env$h <- function(theta=par, order=0, hessian, L, ...) {
 
 ### **spaTMB** example
 
-Finally, an example for which we know the true solution is supplied.
+Finally, an example for which we know the true solution is supplied:
+The Gaussian case.
 
+First, we need to specify the objective function.
+That is, of course, the inner problem with a normalizing constant:
+```{c spaTMBexampleCpp, eval=F}
+#include <TMB.hpp>
+
+template<class Type>
+Type objective_function<Type>::operator() ()
+{
+    DATA_VECTOR(y);
+    PARAMETER(mu);
+    PARAMETER(logSigma);
+    PARAMETER_VECTOR(s); // saddlepoints
+    
+    // Return K_y(s)-s^T y - n/2 log(2*pi)
+    // K_y(s) = sum K_{y[i]}(s[i])
+    // K_N(mu, logSigma)(s) = mu*s + sigma^2 * s^2 / 2
+    
+    Type sigma = exp(logSigma);
+    int n = y.size();
+    
+    // Build CGF
+    Type K = 0;
+    for(int i=0; i<n; i++){
+        K += mu * s(i) + 0.5*s(i)*s(i)*sigma*sigma;
+    }
+    
+    // Build inner problem with normalization constant
+    Type res = K - (s*y).sum() - n * log(2*M_PI);
+    
+    // report sigma
+    ADREPORT(sigma);
+    
+    return res;
+}
+```
+
+On the R side, we do what is described in the previous section:
+
+```{r spaTMBexample, warning=FALSE, message=F, results='asis'}
+# Simulate data
+set.seed(123)
+n <- 10000
+mu <- 3
+sigma <- 1.5
+y <- rnorm(n, mu, sigma)
+
+# data and parameters
+data <- list(y=y)
+parameters <- list(mu=0, logSigma = log(1), s=numeric(n))
+
+# Compile c++ code and load into R
+library(TMB)
+compile("gauss_spa_example.cpp")
+dyn.load(dynlib("gauss_spa_example"))
+
+# create adfun, set s="random" for SPA inner problem
+obj <- MakeADFun(data, parameters, random="s", DLL="gauss_spa_example", silent = T)
+
+# update obj$env$e functions to calculate SPA
+source("spaTMB.R")
+
+# optimize
+opt <- nlminb(obj$par, obj$fn, obj$gr)
+rep <- sdreport(obj)
+knitr::kable(rbind(summary(rep, "fixed", p.value = TRUE), 
+                   summary(rep, "report", p.value = TRUE))) %>%
+  kable_styling(full_width = F)
+```
+The likelihood estimates are on point! 
+The negative log SPA and its gradient are implemented correctly.
+Note that **TMB** is extremely fast, and even with 10000 "latent" variables (read: saddlepoints), the computations are done within a second on my computer.
+Finally, for the Gaussian case, we may calculate the saddlepoints explicitly to check that everything matches:
+$$
+\begin{align}
+\sp &= \arg\min_s (K_Y(s)-sy) \\
+\sp &: K_Y'(s) -x = 0\\
+K_Y(s) &= \mu s + \frac{1}{2}s^2\sigma^2 \text{ in the Gaussian case, thus }\\
+\sp &= \frac{x-\mu}{\sigma^2}
+\end{align}
+$$
+
+```{r spaTMBexampleRes2Show, fig.width=4, fig.height=4, fig.align='center'}
+# check s = normal sp and parameters
+plot(summary(rep, "random")[,"Estimate"], (y-opt$par[1])/(exp(opt$par[2]))^2,
+     main="Numerical versus theoretical saddlepoints",
+     xlab="Numerical", ylab="Theoretical")
+```
+and we see that the numerical quantities matches the theoretical ones.
+
+This is pretty cool! We now only need to supply the inner problem of the SPA (typically very little code) and a normalization constant, and **TMB** will take care of everything in the fastest possible way!
+I will proceed to make a pull request soon.
 
