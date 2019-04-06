@@ -1,3 +1,9 @@
+External/
+*.dll
+*.o
+
+*.Rproj
+
 # History files
 .Rhistory
 .Rapp.history
