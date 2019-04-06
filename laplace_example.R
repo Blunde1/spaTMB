@@ -23,10 +23,18 @@ parameters <- list(phi=phi, logSigma=log(sigma))
 parameters$u <- rep(0,n)
 
 require(TMB)
-compile('laplace.cpp')
-dyn.load(dynlib('laplace'))
+compile('laplace_example.cpp')
+dyn.load(dynlib('laplace_example'))
 
-obj <- MakeADFun(data, parameters, random="u", DLL="laplace")
+obj <- MakeADFun(data, parameters, random="u", DLL="laplace_example")
 obj$fn()
+opt <- nlminb(obj$par, obj$fn, obj$gr)
+opt
+obj$fn()
+obj$env$f()
+obj$env$f(obj$env$last.par, order=0)
+rep <- sdreport(obj)
 
-system.time( opt <- nl
+dyn.unload(dynlib('laplace_example'))
+
+system.time( opt <- nl)
