@@ -8,7 +8,7 @@ Type objective_function<Type>::operator() ()
     PARAMETER(logSigma);
     PARAMETER_VECTOR(s); // saddlepoints
     
-    // Return K_y(s)-s^T y - n/2 log(2*pi)
+    // Return K_y(s)-s^T y - n log(2*pi)
     // K_y(s) = sum K_{y[i]}(s[i])
     // K_N(mu, logSigma)(s) = mu*s + sigma^2 * s^2 / 2
     

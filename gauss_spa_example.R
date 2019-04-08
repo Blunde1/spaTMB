@@ -15,10 +15,10 @@ compile("gauss_spa_example.cpp")
 dyn.load(dynlib("gauss_spa_example"))
 
 # create adfun, set s="random" for SPA inner problem
-obj <- MakeADFun(data, parameters, random="s", DLL="gauss_spa_example", silent = T)
+obj <- MakeADFun(data, parameters, random="s", DLL="gauss_spa_example")
 
 # update obj$env$e functions to calculate SPA
-source("spaTMB.R")
+source("spaTMBv2.R")
 
 # optimize
 opt <- nlminb(obj$par, obj$fn, obj$gr)
